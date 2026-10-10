@@ -3,9 +3,11 @@ import Fastify from 'fastify';
 import type { Ctx } from './context.js';
 import { ApiError } from './lib/errors.js';
 import { coreRoutes } from './routes/core.js';
+import { streamRoutes } from './routes/stream.js';
 
 export async function buildApp(ctx: Ctx, opts: { logger?: boolean } = {}) {
-  const app = Fastify({ logger: opts.logger ?? false });
+  // Long-lived SSE connections would otherwise keep close() waiting forever.
+  const app = Fastify({ logger: opts.logger ?? false, forceCloseConnections: true });
 
   await app.register(cors, {
     origin: true,
@@ -28,6 +30,7 @@ export async function buildApp(ctx: Ctx, opts: { logger?: boolean } = {}) {
   app.get('/health', async () => ({ ok: true }));
 
   await coreRoutes(app, ctx);
+  await streamRoutes(app, ctx);
 
   return app;
 }
