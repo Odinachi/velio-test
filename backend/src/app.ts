@@ -5,6 +5,7 @@ import { ApiError } from './lib/errors.js';
 import { coreRoutes } from './routes/core.js';
 import { inviteRoutes } from './routes/invites.js';
 import { streamRoutes } from './routes/stream.js';
+import { trackingRoutes } from './routes/tracking.js';
 
 export async function buildApp(ctx: Ctx, opts: { logger?: boolean } = {}) {
   // Long-lived SSE connections would otherwise keep close() waiting forever.
@@ -33,6 +34,7 @@ export async function buildApp(ctx: Ctx, opts: { logger?: boolean } = {}) {
   await coreRoutes(app, ctx);
   await streamRoutes(app, ctx);
   await inviteRoutes(app, ctx);
+  await trackingRoutes(app, ctx);
 
   return app;
 }

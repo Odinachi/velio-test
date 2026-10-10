@@ -9,6 +9,12 @@ const applied = await migrate();
 if (applied.length) console.log(`Applied migrations: ${applied.join(', ')}`);
 
 const db = createPool();
+// The tracking views read the holdout split from the database, so keep it in sync with config.
+await db.query(
+  `INSERT INTO experiment_config (key, value) VALUES ('invites_holdout_pct', $1)
+   ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+  [config.invites.holdoutPct],
+);
 const metrics = createMetrics(db);
 const bus = createRedisBus(config.redisUrl, () => metrics.publishFailures.inc());
 const app = await buildApp({ db, bus, metrics }, { logger: true });
