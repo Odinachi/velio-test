@@ -1,0 +1,160 @@
+# Velio · Group bookings with live availability and viral invites
+
+A host creates an activity with limited spots. People book, see availability change live, and bring friends through **vouch** invites (personal, single-use, carries trust) or **public** share links (reach only). Invited guests claim their spot from the Flutter app.
+
+| Folder | What |
+|---|---|
+| [`backend/`](backend) | Node.js + TypeScript (Fastify), PostgreSQL, Redis. REST + Server-Sent Events. |
+| [`web/`](web) | Next.js + TypeScript. Booker, host and tracking views, plus a web landing page for invite links. |
+| [`mobile/`](mobile) | Flutter guest app: open or enter an invite, watch it live, claim a spot. |
+| [`PLANS.md`](PLANS.md) | Scope questions, technical, product and tracking plans (written before the code), and plan vs. reality. |
+| [`OWNERSHIP.md`](OWNERSHIP.md) | Improvement plan for the 30-day scenario. |
+
+---
+
+## Quick start
+
+Requirements: Docker, Node 20+, Flutter 3.27+ (Xcode for iOS or Android Studio for Android).
+
+```bash
+# 1. Database and cache (Postgres on :5442, Redis on :6389 to avoid clashing with local installs)
+docker compose up -d
+
+# 2. Backend on :4000 (migrations run automatically on start)
+cd backend && npm install && npm run dev
+
+# 3. Demo data, from another terminal: activities, bookings and two invite codes
+cd backend && npm run seed
+
+# 4. Web on :3000
+cd web && npm install && npm run dev
+
+# 5. Mobile (iOS simulator or Android emulator)
+cd mobile && flutter pub get && flutter run
+```
+
+* **Who am I?** There is no auth. Use the profile button (top right on web) to create or switch people. The mobile app creates the guest from their first name when they claim.
+* **Open an invite on the phone:** type the code the seed printed, or open the deep link:
+  * iOS: `xcrun simctl openurl booted velio://invite/CODE`
+  * Android: `adb shell am start -a android.intent.action.VIEW -d velio://invite/CODE`
+* **Physical phone:** `flutter run --dart-define=API_URL=http://<your-LAN-IP>:4000`. The Android emulator uses `10.0.2.2` automatically.
+
+### Tests
+
+```bash
+cd backend && npm test          # 25 tests against real Postgres/Redis (uses the velio_test database)
+cd backend && npm run loadtest  # SLO load test against the running API
+cd mobile && flutter test       # 8 tests: parsing, live-update ordering, claim flow, offline queue
+```
+
+---
+
+## Architecture and decisions
+
+```
+ web (Next.js)     mobile (Flutter)
+       │  REST + SSE      │
+       └───────┬──────────┘
+        backend (Fastify)  ── /metrics (Prometheus), /admin/report (goals)
+         │            │
+    PostgreSQL    Redis pub/sub
+  (source of truth)  (fan-out only)
+```
+
+* **PostgreSQL is the only source of truth.** Redis carries notifications and nothing else, so losing Redis loses no bookings; clients heal by refetching on reconnect.
+* **API instances are stateless.** Each subscribes to Redis and serves its own SSE clients, so scaling out needs no sticky sessions. The load test runs across two instances.
+
+### Concurrency: never oversell
+
+A booking is one transaction whose key statement is a conditional atomic increment ([`backend/src/services/bookings.ts`](backend/src/services/bookings.ts)):
+
+```sql
+UPDATE activities SET spots_taken = spots_taken + 1, version = version + 1
+ WHERE id = $1 AND spots_taken < capacity AND starts_at > now()
+RETURNING spots_taken, capacity, version;
+```
+
+Postgres row-locks the activity; queued transactions re-check `spots_taken < capacity` against the latest committed value, so exactly `capacity` of them can ever match. Zero rows means a friendly `409 SOLD_OUT`. The booking row is inserted in the same transaction, so any later failure releases the spot. Further protection:
+
+* `CHECK (spots_taken BETWEEN 0 AND capacity)`: the database itself refuses an oversell, whatever the code does (tested).
+* Unique `(activity_id, user_id) WHERE confirmed`: one spot per person, even with parallel clicks.
+* Idempotency key per attempt: a retry after a lost response returns the original booking.
+* Invite claims lock the invite row first, so a single-use vouch can't be claimed twice.
+
+Why this over `SELECT … FOR UPDATE`, optimistic versioning, a Redis counter or `SERIALIZABLE`: see [PLANS.md §1b](PLANS.md#concurrency-strategy-for-the-last-spot).
+
+**The proof** ([`backend/test/booking-concurrency.test.ts`](backend/test/booking-concurrency.test.ts)):
+* 50 people fire at the last spot over real HTTP sockets → exactly 1 succeeds, 49 get `SOLD_OUT`, counts match.
+* 200 people race for 20 spots → exactly 20 distinct winners.
+* A transaction holds the last spot open while 9 others fire; the test **observes all 9 waiting in `pg_locks`** (so the race is genuinely concurrent), then commits and checks all 9 get `SOLD_OUT`. A rollback variant hands the spot to exactly one waiter.
+* Invite claims and direct bookings racing for the last spots ([`invites.test.ts`](backend/test/invites.test.ts)).
+
+### Real-time availability
+
+1. The booking commits.
+2. The API publishes `{activityId, spotsTaken, capacity, version, committedAt}` to Redis.
+3. Every instance writes it to its SSE connections watching that activity (`GET /stream?activityIds=…`).
+4. Clients apply an update only if `version` is newer, so out-of-order or duplicate messages can't show a wrong count. On reconnect, they refetch.
+
+SSE rather than WebSockets because availability is one-way, SSE is plain HTTP and reconnects by itself. Writes stay on normal REST calls.
+
+### Invites and attribution
+
+* **Vouch:** names a contact, single-use, expires after 7 days or at the start time. **Public:** one reusable link per person per activity.
+* Only people who are going (or the host) can invite.
+* A claim is one transaction: create the guest (if new) → take a spot → count the use → write attribution. If the activity is full, nothing is kept: no orphan guest, no consumed vouch.
+* `attributions` records inviter, invitee, rail, code, invite generation (`inviter.generation + 1`) and whether the invitee was new. `users.generation` is stamped once at signup.
+* **History can't be rewritten:** triggers reject `UPDATE`, `DELETE` and `TRUNCATE` on `attributions` and `events`, and any change to `users.generation` (tested).
+
+### Feature flag and holdout
+
+`INVITES_ENABLED` is a kill switch. `INVITES_HOLDOUT_PCT` (default 10) puts a stable 10% of **activities** (hash of id) in a holdout that never offers invites, so we can compare plans and new users with vs. without invites. Activity-level randomisation avoids leakage inside a shared plan; reasoning in [PLANS.md §1d](PLANS.md#holdout-design).
+
+---
+
+## Where to see the tracking
+
+| Where | What |
+|---|---|
+| **http://localhost:3000/admin** | Every scope goal with value, target and status, plus funnel, conversion by rail, K-factor by rail, holdout comparison. |
+| **http://localhost:4000/admin/report** | Same as JSON. |
+| **http://localhost:4000/metrics** | Prometheus: `velio_booking_attempts_total{outcome,via}`, `velio_booking_duration_seconds`, `velio_availability_latency_seconds` (client-reported), `velio_availability_fanout_seconds` (server), `velio_sse_clients`, and `velio_oversold_activities` (integrity check run on every scrape). |
+| SQL views | One per goal in [`002_tracking_views.sql`](backend/src/db/migrations/002_tracking_views.sql). |
+
+```bash
+docker compose exec postgres psql -U velio -d velio -c "SELECT * FROM v_goal_bookers_who_invite"
+docker compose exec postgres psql -U velio -d velio -c "SELECT * FROM v_goal_invite_conversion"
+docker compose exec postgres psql -U velio -d velio -c "SELECT * FROM v_k_factor_by_rail"
+docker compose exec postgres psql -U velio -d velio -c "SELECT * FROM v_invite_holdout"
+```
+
+### SLO results (load test on a laptop, `npm run loadtest`)
+
+| Run | Booked | Errors | Oversold | Booking p95 | Live update p95 |
+|---|---|---|---|---|---|
+| 1 instance: 1,000 bookers → 200 spots, 50 watchers | 200 / 200 | 0 | 0 | 715 ms | 10 ms |
+| 2 instances: 2,000 bookers → 300 spots, 50 watchers | 300 / 300 | 0 | 0 | 1,262 ms | 7 ms |
+
+All three technical SLOs pass: zero oversold, 100% success on available spots (target 99.5%), and live update p95 far under 2 s. Booking latency in these runs is dominated by all requests arriving in the same instant and queueing on one row; that's the deliberate worst case.
+
+---
+
+## Plan vs. reality
+
+Summarised here; details in [PLANS.md](PLANS.md#plan-vs-reality). The build follows the plan. Additions: cancellation (needed to show a spot reappearing live, and the base for a waitlist) and a server-side fan-out latency metric next to the client-reported one. Not built: rate limiting, bot filtering of invite opens, auth on the admin report. The Flutter app covers the guest journey only, so guests who want to invite onwards use the web app.
+
+## Trade-offs and shortcuts
+
+**Prioritised:** correctness of the booking path and its proof, attribution integrity, measurable goals, and the guest's mobile flow, over breadth of features.
+
+| Shortcut | Why it's OK here | For production |
+|---|---|---|
+| Identity is a user id in a header | Auth is out of scope | Real auth (phone OTP fits invited guests), the id from a session |
+| `/admin/report` and `/metrics` are open | Local prototype | Behind admin auth, or internal network only |
+| Events written from the API to Postgres | Simple, queryable, enough volume for a prototype | Stream to a warehouse (Kafka or a queue → BigQuery/ClickHouse); keep the views there |
+| Views scan all time | Small data | Time-windowed, partitioned `events` by month, materialised daily |
+| No rate limiting on booking/claim/open | Prototype | Per-user and per-IP limits; a Redis token bucket in front of very hot activities, with Postgres still the authority |
+| Clock-offset latency from clients | Good enough to watch the trend; the load test measures exactly | Also track server fan-out time (already exported) |
+| One plan per activity | Simplest reading of the scope | Party-level plans ("my crew") for better social features |
+| Migrations are hand-rolled SQL | Two files | A migration tool with down-migrations and CI checks |
+| Run the app as a DB role with only `INSERT, SELECT` on append-only tables | Triggers already enforce it | Do both |

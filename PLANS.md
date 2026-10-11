@@ -220,4 +220,23 @@ Invites are randomised **at the activity level**: 10% of activities (stable hash
 
 ## Plan vs. reality
 
-*(Filled in after the build.)*
+Filled in after the build.
+
+**Built as planned:** everything listed under "What I'll build in 48 hours": the concurrency strategy, SSE over Redis, both invite rails, claim with attribution, append-only history, activity-level holdout, event log, `/metrics`, `/admin/report`, the web app (booker, host, invite landing, tracking page) and the Flutter guest app. The load test confirms the technical SLOs (results in the README).
+
+**Added**
+
+* **Cancellation.** Not in the scope, but it's the only way a full activity can become available again, so it's needed to test "sold out → spot appears live" and it's the foundation for a waitlist.
+* **Server-side fan-out latency** (`velio_availability_fanout_seconds`). The client-reported latency depends on a clock-offset estimate that ignores one-way network delay, so it slightly under-reads. The server metric and the single-clock load test cover that gap.
+* **A web landing page for invite links** (`/i/CODE`), so a link opened on a laptop works end to end, not only in the app.
+
+**Changed or learned**
+
+* **Losing transactions must end immediately.** While testing, I found that in Postgres a waiter that loses the race for the last spot still holds the row lock until its transaction ends. Holding losers open makes everyone behind them queue. The API rolls back as soon as it sees `SOLD_OUT`; the concurrency test documents this.
+* **`rejected` is its own booking outcome.** Besides success, sold out and errors there are correct refusals (host booking their own activity, activity already started). They are excluded from the success-rate SLO the same way sold out is (see 1a.2).
+
+**Not built (deliberately)**
+
+* Rate limiting and bot filtering of invite opens (risk table above; also item 1 in `OWNERSHIP.md`).
+* Auth on `/admin/report` and `/metrics`.
+* Inviting from the Flutter app. The brief scopes the app to the guest journey; guests who want to bring someone else use the web app, which is how generation 2+ happens. The tests cover multi-hop generations.
