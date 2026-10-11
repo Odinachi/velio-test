@@ -39,7 +39,8 @@ export async function runBookingAttempt<T extends { spot: SpotTaken }>(
     outcome = 'success';
 
     if (!result.spot.replay && result.spot.activity) {
-      await ctx.bus.publish(availabilityOf(result.spot.activity));
+      // Not awaited: the booking is committed, and the broadcast must never delay the reply.
+      void ctx.bus.publish(availabilityOf(result.spot.activity));
       void track(ctx.db, {
         name: 'booking_succeeded',
         userId: result.spot.booking.user_id,

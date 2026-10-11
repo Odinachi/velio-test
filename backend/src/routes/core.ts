@@ -145,7 +145,7 @@ export async function coreRoutes(app: FastifyInstance, ctx: Ctx) {
     const { id } = parse(uuidParam, req.params);
     const user = await requireUser(ctx, req);
     const { booking, activity } = await withTx(db, (tx) => cancelBooking(tx, id, user.id));
-    await ctx.bus.publish(availabilityOf(activity));
+    void ctx.bus.publish(availabilityOf(activity));
     void track(db, { name: 'booking_cancelled', userId: user.id, activityId: booking.activity_id });
     return { booking: bookingDto(booking) };
   });

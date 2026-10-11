@@ -27,6 +27,7 @@ export interface AvailabilityBus {
 }
 
 const CHANNEL = 'velio:availability';
+const PUBLISH_TIMEOUT_MS = 500;
 
 class LocalHub {
   private listeners = new Map<string, Set<Listener>>();
@@ -55,9 +56,20 @@ class LocalHub {
 }
 
 export function createRedisBus(url: string, onPublishFailure?: () => void): AvailabilityBus {
-  const pub = new Redis(url, { maxRetriesPerRequest: 2 });
+  // Fail fast while Redis is down rather than queueing: a booking must never wait on a broadcast.
+  const pub = new Redis(url, { maxRetriesPerRequest: 1, enableOfflineQueue: false });
   const sub = new Redis(url);
   const hub = new LocalHub();
+
+  // ioredis reconnects on its own; log the outage at most every 10s instead of on every retry.
+  let lastLogged = 0;
+  const onError = (err: Error) => {
+    if (Date.now() - lastLogged < 10_000) return;
+    lastLogged = Date.now();
+    console.error('[realtime] redis unavailable:', err.message);
+  };
+  pub.on('error', onError);
+  sub.on('error', onError);
 
   sub.subscribe(CHANNEL).catch((err) => console.error('[realtime] subscribe failed', err.message));
   sub.on('message', (_channel: string, message: string) => {
@@ -70,17 +82,26 @@ export function createRedisBus(url: string, onPublishFailure?: () => void): Avai
 
   return {
     async publish(update) {
+      let timer: NodeJS.Timeout | undefined;
       try {
-        await pub.publish(CHANNEL, JSON.stringify(update));
+        await Promise.race([
+          pub.publish(CHANNEL, JSON.stringify(update)),
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error(`no reply within ${PUBLISH_TIMEOUT_MS}ms`)), PUBLISH_TIMEOUT_MS);
+          }),
+        ]);
       } catch (err) {
         // Bookings never fail because of Redis; clients heal by refetching on reconnect.
         onPublishFailure?.();
         console.error('[realtime] publish failed', (err as Error).message);
+      } finally {
+        clearTimeout(timer);
       }
     },
     subscribe: (key, listener) => hub.subscribe(key, listener),
     async close() {
-      await Promise.allSettled([pub.quit(), sub.quit()]);
+      pub.disconnect();
+      sub.disconnect();
     },
   };
 }
