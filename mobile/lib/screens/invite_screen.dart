@@ -33,7 +33,9 @@ class _InviteScreenState extends State<InviteScreen> {
   LiveAvailability? _stream;
   ClaimPhase _phase = ClaimPhase.idle;
   String? _claimError;
-  List<Attendee> _attendees = [];
+  /// Null until loaded.
+  List<Attendee>? _attendees;
+  bool _attendeesFailed = false;
   final _name = TextEditingController();
   Timer? _retry;
 
@@ -114,8 +116,16 @@ class _InviteScreenState extends State<InviteScreen> {
     if (invite == null) return;
     try {
       final list = await api.attendees(invite.activity.id);
-      if (mounted) setState(() => _attendees = list);
-    } on ApiException catch (_) {}
+      if (mounted) {
+        setState(() {
+          _attendees = list;
+          _attendeesFailed = false;
+        });
+      }
+    } on ApiException catch (_) {
+      // Don't leave a loading placeholder spinning forever; the next live update retries.
+      if (mounted) setState(() => _attendeesFailed = true);
+    }
   }
 
   Future<void> _claim() async {
@@ -189,7 +199,7 @@ class _InviteScreenState extends State<InviteScreen> {
           child: invite == null
               ? (_error != null ? _ErrorView(error: _error!, onRetry: _load) : const _LoadingView())
               : (_phase == ClaimPhase.done || (invite.going && !invite.isInviter))
-                  ? _SuccessView(invite: invite, attendees: _attendees, justClaimed: _phase == ClaimPhase.done, name: store.userName)
+                  ? _SuccessView(invite: invite, attendees: _attendees, attendeesFailed: _attendeesFailed, justClaimed: _phase == ClaimPhase.done, name: store.userName)
                   : _InviteView(
                       invite: invite,
                       fromCache: _fromCache,
@@ -401,9 +411,16 @@ class _InviteView extends StatelessWidget {
 }
 
 class _SuccessView extends StatelessWidget {
-  const _SuccessView({required this.invite, required this.attendees, required this.justClaimed, required this.name});
+  const _SuccessView({
+    required this.invite,
+    required this.attendees,
+    required this.attendeesFailed,
+    required this.justClaimed,
+    required this.name,
+  });
   final ResolvedInvite invite;
-  final List<Attendee> attendees;
+  final List<Attendee>? attendees;
+  final bool attendeesFailed;
   final bool justClaimed;
   final String? name;
 
@@ -450,8 +467,10 @@ class _SuccessView extends StatelessWidget {
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             const Text('Who\'s going', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
             const SizedBox(height: 8),
-            if (attendees.isEmpty) const Skeleton(height: 40),
-            for (final a in attendees)
+            if (attendees == null && !attendeesFailed) const Skeleton(height: 40),
+            if (attendees == null && attendeesFailed)
+              Text('The guest list will show up here once we can reach Velio.', style: TextStyle(color: muted)),
+            for (final a in attendees ?? const <Attendee>[])
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 6),
                 child: Row(children: [

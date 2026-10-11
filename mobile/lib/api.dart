@@ -225,7 +225,15 @@ class Api {
     } on Exception {
       throw ApiException(0, 'OFFLINE', "You're offline. We'll keep trying.");
     }
-    final json = res.body.isEmpty ? <String, dynamic>{} : jsonDecode(res.body) as Map<String, dynamic>;
+    // A proxy or load balancer can answer with an HTML error page; treat that as a failed request.
+    Map<String, dynamic> json;
+    try {
+      final decoded = res.body.isEmpty ? <String, dynamic>{} : jsonDecode(res.body);
+      json = decoded is Map<String, dynamic> ? decoded : <String, dynamic>{};
+    } on FormatException {
+      json = <String, dynamic>{};
+      if (res.statusCode < 400) throw ApiException(502, 'BAD_RESPONSE', 'Something went wrong on our side. Retrying…');
+    }
     if (res.statusCode >= 400) {
       final err = json['error'] as Map<String, dynamic>? ?? {};
       throw ApiException(
