@@ -233,6 +233,7 @@ Filled in after the build.
 **Changed or learned**
 
 * **Losing transactions must end immediately.** While testing, I found that in Postgres a waiter that loses the race for the last spot still holds the row lock until its transaction ends. Holding losers open makes everyone behind them queue. The API rolls back as soon as it sees `SOLD_OUT`; the concurrency test documents this.
+* **"Bookings don't depend on Redis" needed proving.** An outage test showed the Redis client queueing publishes while disconnected, so a committed booking waited 30s+ for its broadcast and the client saw a timeout despite holding the spot. Publishing now fails fast (500ms cap, no offline queue) and isn't awaited in the request path.
 * **`rejected` is its own booking outcome.** Besides success, sold out and errors there are correct refusals (host booking their own activity, activity already started). They are excluded from the success-rate SLO the same way sold out is (see 1a.2).
 
 **Not built (deliberately)**
