@@ -42,9 +42,9 @@ cd mobile && flutter pub get && flutter run
 ### Tests
 
 ```bash
-cd backend && npm test          # 25 tests against real Postgres/Redis (uses the velio_test database)
+cd backend && npm test          # 65 tests against real Postgres/Redis: races, edge cases, chaos, outages
 cd backend && npm run loadtest  # SLO load test against the running API
-cd mobile && flutter test       # 8 tests: parsing, live-update ordering, claim flow, offline queue
+cd mobile && flutter test       # 24 tests: parsing, live updates, claim flow, offline queue, failures
 ```
 
 ---
