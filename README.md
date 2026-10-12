@@ -12,40 +12,156 @@ A host creates an activity with limited spots. People book, see availability cha
 
 ---
 
-## Quick start
+## Running everything
 
-Requirements: Docker, Node 20+, Flutter 3.27+ (Xcode for iOS or Android Studio for Android).
+### Prerequisites
+
+| Tool | Version | Used for |
+|---|---|---|
+| Docker Desktop | any recent | PostgreSQL 16 and Redis 7 |
+| Node.js | 20.9+ (tested on 22) | backend and web |
+| Flutter | 3.27+ | guest app |
+| Xcode (macOS) or Android Studio | latest stable | iOS simulator or Android emulator |
+
+Ports used: **5442** Postgres, **6389** Redis, **4000** API, **3000** web. Postgres and Redis use non-default ports so they don't clash with local installs.
+
+### Quick start
 
 ```bash
-# 1. Database and cache (Postgres on :5442, Redis on :6389 to avoid clashing with local installs)
+# Terminal 1: database and cache
 docker compose up -d
 
-# 2. Backend on :4000 (migrations run automatically on start)
+# Terminal 2: API on http://localhost:4000 (applies migrations on start, reloads on save)
 cd backend && npm install && npm run dev
 
-# 3. Demo data, from another terminal: activities, bookings and two invite codes
+# Terminal 3: demo data (run once the API is up)
 cd backend && npm run seed
 
-# 4. Web on :3000
+# Terminal 4: web app on http://localhost:3000
 cd web && npm install && npm run dev
 
-# 5. Mobile (iOS simulator or Android emulator)
+# Terminal 5: guest app on a simulator or emulator
 cd mobile && flutter pub get && flutter run
 ```
 
-* **Who am I?** There is no auth. Use the profile button (top right on web) to create or switch people. The mobile app creates the guest from their first name when they claim.
-* **Open an invite on the phone:** type the code the seed printed, or open the deep link:
-  * iOS: `xcrun simctl openurl booted velio://invite/CODE`
-  * Android: `adb shell am start -a android.intent.action.VIEW -d velio://invite/CODE`
-* **Physical phone:** `flutter run --dart-define=API_URL=http://<your-LAN-IP>:4000`. The Android emulator uses `10.0.2.2` automatically.
+The seed prints two invite codes, something like:
+
+```
+Vouch code for Kemi:  ZV673W5P   http://localhost:3000/i/ZV673W5P
+Public share code:    SXTFUZ5H   http://localhost:3000/i/SXTFUZ5H
+```
+
+Check it's all up:
+
+```bash
+docker compose ps                     # postgres and redis: healthy
+curl localhost:4000/health            # {"ok":true}
+open http://localhost:3000            # web app
+```
+
+### A 5-minute walkthrough
+
+1. **Book on the web.** Open http://localhost:3000, click **Profile** (top right) and create a name. There's no auth; the profile menu also lets you switch between people. Open an activity and book it. *Pottery Night* has one spot left, so it's good for testing the sold-out state.
+2. **Watch it live.** Open the same activity in a second browser window (a private window gets its own profile). Book in one and watch the count, bar and guest list change in the other.
+3. **Invite.** After booking, the invite panel appears. Create a **vouch** (for a named friend, single-use) or a **share link** (reusable).
+4. **Claim on the phone.** In the app, type the vouch code (or paste it with the clipboard button) and claim with a first name. Keep the web activity page open and the new guest appears in the list.
+5. **Host view.** Switch to **Host**, create an activity, and open it for live attendance showing who came through which invite.
+6. **Tracking.** Open http://localhost:3000/admin for every scope goal, the funnel, conversion by rail, K-factor and the holdout comparison.
+
+### Running the guest app
+
+| Target | Command |
+|---|---|
+| iOS simulator | `open -a Simulator`, then `cd mobile && flutter run` |
+| Android emulator | start an emulator from Android Studio, then `cd mobile && flutter run`. The app reaches your machine through `10.0.2.2` automatically. |
+| Physical phone (same Wi-Fi) | `cd mobile && flutter run --dart-define=API_URL=http://<your-computer's-LAN-IP>:4000` |
+| Pick a device | `flutter devices`, then `flutter run -d <device-id>` |
+
+Opening an invite by **deep link** instead of typing the code:
+
+```bash
+xcrun simctl openurl booted velio://invite/CODE                                        # iOS simulator
+adb shell am start -a android.intent.action.VIEW -d velio://invite/CODE                # Android emulator
+```
+
+iOS asks "Open in Velio?" the first time; tap **Open**.
+
+Things to try on the phone: claim the same vouch twice, claim a full activity, or turn the network off mid-claim (stop the API with Ctrl-C, or use the Network Link Conditioner). The claim is queued and goes through once the API is back.
+
+### Configuration
+
+Everything has a working default; override with environment variables.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `PORT` | `4000` | API port |
+| `DATABASE_URL` | `postgres://velio:velio@localhost:5442/velio` | Postgres connection |
+| `REDIS_URL` | `redis://localhost:6389` | Redis for live updates |
+| `DB_POOL_SIZE` | `20` | Connections per API instance |
+| `WEB_URL` | `http://localhost:3000` | Base for invite links (`/i/CODE`) |
+| `INVITES_ENABLED` | `true` | Kill switch for the invite feature |
+| `INVITES_HOLDOUT_PCT` | `10` | Share of activities that never offer invites |
+| `VOUCH_TTL_HOURS` | `168` | How long a vouch stays valid (capped at the start time) |
+| `NEXT_PUBLIC_API_URL` (web) | `http://localhost:4000` | Where the web app finds the API; see `web/.env.example` |
+| `API_URL` (mobile, `--dart-define`) | `localhost:4000` (iOS) / `10.0.2.2:4000` (Android) | Where the app finds the API |
+
+**Run a second API instance** to see live updates cross instances through Redis:
+
+```bash
+cd backend && PORT=4001 npm run dev
+```
 
 ### Tests
 
+Docker must be running; the backend tests use a separate `velio_test` database, so they never touch your demo data.
+
 ```bash
 cd backend && npm test          # 65 tests against real Postgres/Redis: races, edge cases, chaos, outages
-cd backend && npm run loadtest  # SLO load test against the running API
+cd backend && npm run typecheck
 cd mobile && flutter test       # 24 tests: parsing, live updates, claim flow, offline queue, failures
+cd mobile && flutter analyze
+cd web && npm run build         # type-checks and builds the web app
 ```
+
+**Load test** (with the API running). It fires every booking at once and checks the three technical SLOs:
+
+```bash
+cd backend && npm run loadtest
+cd backend && API_URLS=http://localhost:4000,http://localhost:4001 BOOKERS=2000 SPOTS=300 npm run loadtest
+```
+
+If it fails with `EMFILE`, raise the open-file limit first: `ulimit -n 10240`. The load test creates its own activity, so reset afterwards if you want a tidy demo.
+
+### Reset to a clean demo
+
+```bash
+docker compose down -v && docker compose up -d   # wipes Postgres and Redis (the test database is recreated too)
+# restart the API (it re-applies migrations), then:
+cd backend && npm run seed
+```
+
+After a reset, **uninstall the guest app** from the simulator (long-press → Remove App, or `xcrun simctl uninstall booted app.velio.velioGuest`). Otherwise it remembers a profile that no longer exists.
+
+### Stopping everything
+
+Ctrl-C in the API, web and Flutter terminals, then:
+
+```bash
+docker compose down        # keeps the data
+docker compose down -v     # also deletes the data
+```
+
+### Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| `port is already allocated` from Docker | Something else uses 5442 or 6389. Stop it, or change the host ports in `docker-compose.yml` and set `DATABASE_URL` / `REDIS_URL` to match. |
+| API can't connect to the database | `docker compose ps` should show both services healthy; wait a few seconds after `up -d`. |
+| Web shows "We couldn't reach Velio" | The API isn't running on :4000, or `NEXT_PUBLIC_API_URL` points elsewhere. |
+| iOS app is blank when opened from the home screen | Debug builds need the Flutter tool attached. Start it with `flutter run`. |
+| Phone can't reach the API | On a physical device use your computer's LAN IP via `--dart-define=API_URL=…`, and make sure both are on the same network. |
+| Guest app says it needs a name but shows no name field | You reset the database while the app was installed. Uninstall the app and open it again. |
+| `npm test` fails with "database velio_test does not exist" | The Postgres volume predates the init script. Run `docker compose down -v && docker compose up -d`. |
 
 ---
 
