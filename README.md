@@ -180,6 +180,45 @@ docker compose down -v     # also deletes the data
 * **PostgreSQL is the only source of truth.** Redis carries notifications and nothing else, so losing Redis loses no bookings; clients heal by refetching on reconnect.
 * **API instances are stateless.** Each subscribes to Redis and serves its own SSE clients, so scaling out needs no sticky sessions. The load test runs across two instances.
 
+### Data model
+
+9 tables: 7 hold product data and 2 support the system. On top of them, 9 read-only views compute the tracking numbers ([`002_tracking_views.sql`](backend/src/db/migrations/002_tracking_views.sql)). The schema is in [`001_schema.sql`](backend/src/db/migrations/001_schema.sql).
+
+```mermaid
+erDiagram
+    users ||--o{ activities : hosts
+    activities ||--|| plans : "has one"
+    activities ||--o{ invites : "invited to"
+    users ||--o{ invites : creates
+    users ||--o{ bookings : holds
+    activities ||--o{ bookings : "spots in"
+    plans ||--o{ bookings : groups
+    invites |o--o{ bookings : "came through"
+    users ||--o{ attributions : "invitee / inviter"
+    invites ||--o{ attributions : records
+    bookings ||--|| attributions : produced
+    activities ||--o{ attributions : for
+```
+
+| Table | What a row is | Points to |
+|---|---|---|
+| `users` | A person: host, booker or guest. `generation` = invite hops from an original user, stamped at signup and never changed. | — |
+| `activities` | A bookable thing with `capacity` and the live `spots_taken` count. `CHECK (spots_taken <= capacity)` makes overselling impossible at the database level. | `host_id → users` |
+| `plans` | The group going to an activity, exactly one per activity. | `activity_id → activities` |
+| `bookings` | One person holding one spot. One live booking per person per activity. | `user_id → users`, `activity_id → activities`, `plan_id → plans`, `invite_id → invites` (empty for direct bookings) |
+| `invites` | A vouch (one named person, single use) or a public link (reusable). | `activity_id → activities`, `inviter_id → users` |
+| `attributions` | Permanent record that an invite brought someone in: who, by whom, which rail and code, which generation, new user or not. **Append-only.** | `invitee_id → users`, `inviter_id → users`, `invite_id → invites`, `booking_id → bookings`, `activity_id → activities` |
+| `events` | The tracking log (views, attempts, opens, claims, latency). **Append-only.** | none, on purpose |
+| `experiment_config` | Settings the views need (the holdout percentage). Synced from config on startup. | — |
+| `schema_migrations` | Which migrations have run. | — |
+
+**Design notes**
+
+* **`events` has no foreign keys.** It stores user, activity and invite IDs as plain values: an append-only log must never block a write elsewhere, and it records anonymous visitors (by device) who aren't users yet.
+* **History can't be rewritten.** Triggers reject `UPDATE`, `DELETE` and `TRUNCATE` on `attributions` and `events`, and any change to `users.generation`.
+* **Known redundancy:** `plans` is strictly one-to-one with `activities`, so `bookings.plan_id` says nothing `bookings.activity_id` doesn't. It's kept so "a plan" exists as a concept (the scope says booking "puts them in a Plan together"), and it earns its place if plans become per group ("Ada's crew") rather than per activity. Until then it could be dropped.
+* **Deliberate duplication:** `attributions.activity_id` could be reached through `booking_id`, but an audit record should be readable on its own, without joins.
+
 ### Concurrency: never oversell
 
 A booking is one transaction whose key statement is a conditional atomic increment ([`backend/src/services/bookings.ts`](backend/src/services/bookings.ts)):
